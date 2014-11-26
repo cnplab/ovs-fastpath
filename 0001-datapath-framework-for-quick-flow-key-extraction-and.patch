@@ -1,4 +1,4 @@
-From 39874ae2e98c0bfae6af04646573ff216ae79064 Mon Sep 17 00:00:00 2001
+From acc0f21af625a4d6b4061a27a3a621b8789de43b Mon Sep 17 00:00:00 2001
 From: Michio Honda <michio.honda@neclab.eu>
 Date: Wed, 5 Nov 2014 15:22:45 +0100
 Subject: [PATCH 1/5] datapath: framework for quick flow key extraction and
@@ -11,31 +11,31 @@ key extraction and/or packet lookup for a specific pattern
 of flows installed in the datapath (e.g., all the flows
 are interested in only source and destination MAC addresses).
 ---
- datapath/actions.c      |  20 ++++++---
+ datapath/actions.c      |  19 ++++++---
  datapath/datapath.c     |   9 +++-
  datapath/datapath.h     |   2 +
- datapath/flow.c         |  48 ++++++++++++++++++++--
- datapath/flow.h         |  40 ++++++++++++++++++
+ datapath/flow.c         |  47 ++++++++++++++++++++-
+ datapath/flow.h         |  42 +++++++++++++++++++
  datapath/flow_netlink.c |  60 ---------------------------
  datapath/flow_table.c   | 107 ++++++++++++++++++++++++++++++++++++++++++++++++
  datapath/flow_table.h   |  12 ++++++
  datapath/vport.c        |  18 +++++++-
- 9 files changed, 244 insertions(+), 72 deletions(-)
+ 9 files changed, 246 insertions(+), 70 deletions(-)
 
 diff --git a/datapath/actions.c b/datapath/actions.c
-index a42ad1e..3662084 100644
+index 5a1dbe2..2edd5f8 100644
 --- a/datapath/actions.c
 +++ b/datapath/actions.c
-@@ -635,6 +635,7 @@ static int output_userspace(struct datapath *dp, struct sk_buff *skb,
- 	struct ovs_tunnel_info info;
+@@ -628,6 +628,7 @@ static int output_userspace(struct datapath *dp, struct sk_buff *skb,
+ 	int rem;
  
  	upcall.cmd = OVS_PACKET_CMD_ACTION;
 +	ovs_flow_key_rebuild(skb, key);
  	upcall.userdata = NULL;
  	upcall.portid = 0;
  	upcall.egress_tun_info = NULL;
-@@ -800,15 +801,22 @@ static int execute_recirc(struct datapath *dp, struct sk_buff *skb,
- 			  struct sw_flow_key *key, const struct nlattr *a, int rem)
+@@ -789,14 +790,22 @@ static int execute_recirc(struct datapath *dp, struct sk_buff *skb,
+ 			  const struct nlattr *a, int rem)
  {
  	struct deferred_action *da;
 +	const struct flow_fastpath *fp;
@@ -56,15 +56,14 @@ index a42ad1e..3662084 100644
  		err = ovs_flow_key_update(skb, key);
 -		if (err)
 -			return err;
--
 -	}
 +	if (err)
 +		return err;
  	BUG_ON(!is_flow_key_valid(key));
  
- 	if (!last_action(a, rem)) {
+ 	if (!nla_is_last(a, rem)) {
 diff --git a/datapath/datapath.c b/datapath/datapath.c
-index 789b453..7210ab3 100644
+index 3607170..d806d75 100644
 --- a/datapath/datapath.c
 +++ b/datapath/datapath.c
 @@ -267,13 +267,18 @@ void ovs_dp_process_packet(struct sk_buff *skb, struct sw_flow_key *key)
@@ -89,7 +88,7 @@ index 789b453..7210ab3 100644
  		upcall.portid = ovs_vport_find_upcall_portid(p, skb);
  		upcall.egress_tun_info = NULL;
 diff --git a/datapath/datapath.h b/datapath/datapath.h
-index 7dfd5af..b85ee2a 100644
+index fdf35f0..195faa2 100644
 --- a/datapath/datapath.h
 +++ b/datapath/datapath.h
 @@ -104,6 +104,8 @@ struct datapath {
@@ -102,16 +101,15 @@ index 7dfd5af..b85ee2a 100644
  #define OVS_CB(skb) ((struct ovs_skb_cb *)(skb)->cb)
  
 diff --git a/datapath/flow.c b/datapath/flow.c
-index a3c5d2f..53ee71f 100644
+index 69b13b3..c653d6a 100644
 --- a/datapath/flow.c
 +++ b/datapath/flow.c
-@@ -680,9 +680,19 @@ int ovs_flow_key_update(struct sk_buff *skb, struct sw_flow_key *key)
+@@ -681,8 +681,19 @@ int ovs_flow_key_update(struct sk_buff *skb, struct sw_flow_key *key)
  	return key_extract(skb, key);
  }
  
 -int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
--			 struct sk_buff *skb,
--			 struct sw_flow_key *key)
+-			 struct sk_buff *skb, struct sw_flow_key *key)
 +int ovs_flow_key_rebuild(struct sk_buff *skb, struct sw_flow_key *key)
 +{
 +	if (!OVS_CB(skb)->key_maybe_masked)
@@ -128,7 +126,7 @@ index a3c5d2f..53ee71f 100644
  {
  	/* Extract metadata from packet. */
  	if (tun_info) {
-@@ -708,7 +718,13 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
+@@ -708,7 +719,13 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
  	key->phy.skb_mark = skb->mark;
  	key->ovs_flow_hash = 0;
  	key->recirc_id = 0;
@@ -142,7 +140,7 @@ index a3c5d2f..53ee71f 100644
  	return key_extract(skb, key);
  }
  
-@@ -725,3 +741,29 @@ int ovs_flow_key_extract_userspace(const struct nlattr *attr,
+@@ -725,3 +742,29 @@ int ovs_flow_key_extract_userspace(const struct nlattr *attr,
  
  	return key_extract(skb, key);
  }
@@ -173,13 +171,15 @@ index a3c5d2f..53ee71f 100644
 +}
 +
 diff --git a/datapath/flow.h b/datapath/flow.h
-index c78b864..8fb1566 100644
+index 2bbf789..038c9d8 100644
 --- a/datapath/flow.h
 +++ b/datapath/flow.h
-@@ -260,5 +260,45 @@ int ovs_flow_key_extract_userspace(const struct nlattr *attr,
+@@ -258,5 +258,47 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
+ int ovs_flow_key_extract_userspace(const struct nlattr *attr,
+ 				   struct sk_buff *skb,
  				   struct sw_flow_key *key, bool log);
- /* Update the non-metadata part of the flow key using skb. */
- int ovs_flow_key_update(struct sk_buff *skb, struct sw_flow_key *key);
++/* Update the non-metadata part of the flow key using skb. */
++int ovs_flow_key_update(struct sk_buff *skb, struct sw_flow_key *key);
 +int ovs_flow_key_rebuild(struct sk_buff *skb, struct sw_flow_key *key);
 +void ovs_metadata_key_extract(const struct ovs_tunnel_info *tun_info,
 +			     struct sk_buff *skb,
@@ -223,11 +223,11 @@ index c78b864..8fb1566 100644
  
  #endif /* flow.h */
 diff --git a/datapath/flow_netlink.c b/datapath/flow_netlink.c
-index 37b0bdd..013a4e9 100644
+index 4aae305..98ca509 100644
 --- a/datapath/flow_netlink.c
 +++ b/datapath/flow_netlink.c
-@@ -51,66 +51,6 @@
- 
+@@ -50,66 +50,6 @@
+ #include "flow.h"
  #include "flow_netlink.h"
  
 -static void update_range(struct sw_flow_match *match,
@@ -489,7 +489,7 @@ index ad410fd..89e7a78 100644
   * Returns zero if successful or a negative error code.
   */
 diff --git a/datapath/flow_table.h b/datapath/flow_table.h
-index 9eb4af9..c75f271 100644
+index 80c01a3..b1ce72a 100644
 --- a/datapath/flow_table.h
 +++ b/datapath/flow_table.h
 @@ -56,12 +56,24 @@ struct table_instance {

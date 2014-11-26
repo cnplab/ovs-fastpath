@@ -1,6 +1,6 @@
-From 423f6d2eb57f7df3e7eb4e8359556a1c868772a7 Mon Sep 17 00:00:00 2001
+From f45177725933810deea3acbbd903c0e2181daa4d Mon Sep 17 00:00:00 2001
 From: Michio Honda <michio.honda@neclab.eu>
-Date: Wed, 26 Nov 2014 22:40:57 +0100
+Date: Wed, 26 Nov 2014 23:03:07 +0100
 Subject: [PATCH 0/5] *** SUBJECT HERE ***
 
 *** BLURB HERE ***
@@ -12,16 +12,16 @@ Michio Honda (5):
   datapath: add support for flows with wildcarded MAC addresses
   datapath: allowing for 802.1q encap without KEY_ATTR_ETHERNET
 
- datapath/actions.c      |  20 +++-
+ datapath/actions.c      |  19 +++-
  datapath/datapath.c     |   9 +-
  datapath/datapath.h     |   2 +
- datapath/flow.c         |  52 ++++++++-
- datapath/flow.h         |  42 +++++++
+ datapath/flow.c         |  51 ++++++++-
+ datapath/flow.h         |  44 ++++++++
  datapath/flow_netlink.c |  68 +-----------
  datapath/flow_table.c   | 287 ++++++++++++++++++++++++++++++++++++++++++++++++
  datapath/flow_table.h   |  12 ++
  datapath/vport.c        |  18 ++-
- 9 files changed, 432 insertions(+), 78 deletions(-)
+ 9 files changed, 434 insertions(+), 76 deletions(-)
 
 -- 
 1.9.3 (Apple Git-50)

@@ -1,4 +1,4 @@
-From 42d71963a83f84591553f137974db19a371756ca Mon Sep 17 00:00:00 2001
+From 1e508cb493e30e706cff2e645147758bf5685d8b Mon Sep 17 00:00:00 2001
 From: Michio Honda <michio.honda@neclab.eu>
 Date: Wed, 26 Nov 2014 22:00:29 +0100
 Subject: [PATCH 3/5] datapath: quick flow lookup for VLAN TCI
@@ -18,10 +18,10 @@ Gbps NICs by 17 % for 64 byte frames.
  3 files changed, 105 insertions(+), 2 deletions(-)
 
 diff --git a/datapath/flow.c b/datapath/flow.c
-index 53ee71f..3d85783 100644
+index c653d6a..292bd34 100644
 --- a/datapath/flow.c
 +++ b/datapath/flow.c
-@@ -292,7 +292,7 @@ static bool icmp6hdr_ok(struct sk_buff *skb)
+@@ -293,7 +293,7 @@ static bool icmp6hdr_ok(struct sk_buff *skb)
  				  sizeof(struct icmp6hdr));
  }
  
@@ -30,7 +30,7 @@ index 53ee71f..3d85783 100644
  {
  	struct qtag_prefix {
  		__be16 eth_type; /* ETH_P_8021Q */
-@@ -314,7 +314,7 @@ static int parse_vlan(struct sk_buff *skb, struct sw_flow_key *key)
+@@ -315,7 +315,7 @@ static int parse_vlan(struct sk_buff *skb, struct sw_flow_key *key)
  	return 0;
  }
  
@@ -40,7 +40,7 @@ index 53ee71f..3d85783 100644
  	struct llc_snap_hdr {
  		u8  dsap;  /* Always 0xAA */
 diff --git a/datapath/flow.h b/datapath/flow.h
-index 8fb1566..77def65 100644
+index 038c9d8..fca8a70 100644
 --- a/datapath/flow.h
 +++ b/datapath/flow.h
 @@ -301,4 +301,6 @@ void update_range(struct sw_flow_match *, size_t, size_t, bool);
