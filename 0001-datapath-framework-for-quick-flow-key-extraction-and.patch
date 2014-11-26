@@ -1,0 +1,558 @@
+From 39874ae2e98c0bfae6af04646573ff216ae79064 Mon Sep 17 00:00:00 2001
+From: Michio Honda <michio.honda@neclab.eu>
+Date: Wed, 5 Nov 2014 15:22:45 +0100
+Subject: [PATCH 1/5] datapath: framework for quick flow key extraction and
+ lookup
+
+Parsing packets against all the flow-key fields and lookup
+is expensive.
+This patch enables to implement least-possible flow
+key extraction and/or packet lookup for a specific pattern
+of flows installed in the datapath (e.g., all the flows
+are interested in only source and destination MAC addresses).
+---
+ datapath/actions.c      |  20 ++++++---
+ datapath/datapath.c     |   9 +++-
+ datapath/datapath.h     |   2 +
+ datapath/flow.c         |  48 ++++++++++++++++++++--
+ datapath/flow.h         |  40 ++++++++++++++++++
+ datapath/flow_netlink.c |  60 ---------------------------
+ datapath/flow_table.c   | 107 ++++++++++++++++++++++++++++++++++++++++++++++++
+ datapath/flow_table.h   |  12 ++++++
+ datapath/vport.c        |  18 +++++++-
+ 9 files changed, 244 insertions(+), 72 deletions(-)
+
+diff --git a/datapath/actions.c b/datapath/actions.c
+index a42ad1e..3662084 100644
+--- a/datapath/actions.c
++++ b/datapath/actions.c
+@@ -635,6 +635,7 @@ static int output_userspace(struct datapath *dp, struct sk_buff *skb,
+ 	struct ovs_tunnel_info info;
+ 
+ 	upcall.cmd = OVS_PACKET_CMD_ACTION;
++	ovs_flow_key_rebuild(skb, key);
+ 	upcall.userdata = NULL;
+ 	upcall.portid = 0;
+ 	upcall.egress_tun_info = NULL;
+@@ -800,15 +801,22 @@ static int execute_recirc(struct datapath *dp, struct sk_buff *skb,
+ 			  struct sw_flow_key *key, const struct nlattr *a, int rem)
+ {
+ 	struct deferred_action *da;
++	const struct flow_fastpath *fp;
++	int err;
+ 
+-	if (!is_flow_key_valid(key)) {
+-		int err;
++	fp = rcu_dereference_ovsl(dp->table.fastpath);
++	if (fp) {
++		struct sw_flow *flow;
+ 
++		flow = fp->lookup(skb, key, &err);
++		if (likely(!err)) {
++			OVS_CB(skb)->flow = flow;
++			OVS_CB(skb)->key_maybe_masked = 1;
++		}
++	} else if (!is_flow_key_valid(key))
+ 		err = ovs_flow_key_update(skb, key);
+-		if (err)
+-			return err;
+-
+-	}
++	if (err)
++		return err;
+ 	BUG_ON(!is_flow_key_valid(key));
+ 
+ 	if (!last_action(a, rem)) {
+diff --git a/datapath/datapath.c b/datapath/datapath.c
+index 789b453..7210ab3 100644
+--- a/datapath/datapath.c
++++ b/datapath/datapath.c
+@@ -267,13 +267,18 @@ void ovs_dp_process_packet(struct sk_buff *skb, struct sw_flow_key *key)
+ 	stats = this_cpu_ptr(dp->stats_percpu);
+ 
+ 	/* Look up flow. */
+-	flow = ovs_flow_tbl_lookup_stats(&dp->table, key, skb_get_hash(skb),
+-					 &n_mask_hit);
++	flow = OVS_CB(skb)->flow;
++	if (flow)
++		n_mask_hit = 1; /* XXX pretend mask cache hit */
++	else if (!OVS_CB(skb)->key_maybe_masked)
++		flow = ovs_flow_tbl_lookup_stats(&dp->table, key,
++				skb_get_hash(skb), &n_mask_hit);
+ 	if (unlikely(!flow)) {
+ 		struct dp_upcall_info upcall;
+ 		int error;
+ 
+ 		upcall.cmd = OVS_PACKET_CMD_MISS;
++		ovs_flow_key_rebuild(skb, key);
+ 		upcall.userdata = NULL;
+ 		upcall.portid = ovs_vport_find_upcall_portid(p, skb);
+ 		upcall.egress_tun_info = NULL;
+diff --git a/datapath/datapath.h b/datapath/datapath.h
+index 7dfd5af..b85ee2a 100644
+--- a/datapath/datapath.h
++++ b/datapath/datapath.h
+@@ -104,6 +104,8 @@ struct datapath {
+ struct ovs_skb_cb {
+ 	struct ovs_tunnel_info  *egress_tun_info;
+ 	struct vport		*input_vport;
++	struct sw_flow		*flow;
++	uint8_t key_maybe_masked;
+ };
+ #define OVS_CB(skb) ((struct ovs_skb_cb *)(skb)->cb)
+ 
+diff --git a/datapath/flow.c b/datapath/flow.c
+index a3c5d2f..53ee71f 100644
+--- a/datapath/flow.c
++++ b/datapath/flow.c
+@@ -680,9 +680,19 @@ int ovs_flow_key_update(struct sk_buff *skb, struct sw_flow_key *key)
+ 	return key_extract(skb, key);
+ }
+ 
+-int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
+-			 struct sk_buff *skb,
+-			 struct sw_flow_key *key)
++int ovs_flow_key_rebuild(struct sk_buff *skb, struct sw_flow_key *key)
++{
++	if (!OVS_CB(skb)->key_maybe_masked)
++		return 0;
++	else if (ovs_flow_key_update(skb, key))
++		return -1;
++	OVS_CB(skb)->key_maybe_masked = 0;
++	return 0;
++}
++
++void ovs_metadata_key_extract(const struct ovs_tunnel_info *tun_info,
++			     struct sk_buff *skb,
++			     struct sw_flow_key *key)
+ {
+ 	/* Extract metadata from packet. */
+ 	if (tun_info) {
+@@ -708,7 +718,13 @@ int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
+ 	key->phy.skb_mark = skb->mark;
+ 	key->ovs_flow_hash = 0;
+ 	key->recirc_id = 0;
++}
+ 
++int ovs_flow_key_extract(const struct ovs_tunnel_info *tun_info,
++			 struct sk_buff *skb,
++			 struct sw_flow_key *key)
++{
++	ovs_metadata_key_extract(tun_info, skb, key);
+ 	return key_extract(skb, key);
+ }
+ 
+@@ -725,3 +741,29 @@ int ovs_flow_key_extract_userspace(const struct nlattr *attr,
+ 
+ 	return key_extract(skb, key);
+ }
++
++void update_range(struct sw_flow_match *match,
++		  size_t offset, size_t size, bool is_mask)
++{
++	struct sw_flow_key_range *range;
++	size_t start = rounddown(offset, sizeof(long));
++	size_t end = roundup(offset + size, sizeof(long));
++
++	if (!is_mask)
++		range = &match->range;
++	else
++		range = &match->mask->range;
++
++	if (range->start == range->end) {
++		range->start = start;
++		range->end = end;
++		return;
++	}
++
++	if (range->start > start)
++		range->start = start;
++
++	if (range->end < end)
++		range->end = end;
++}
++
+diff --git a/datapath/flow.h b/datapath/flow.h
+index c78b864..8fb1566 100644
+--- a/datapath/flow.h
++++ b/datapath/flow.h
+@@ -260,5 +260,45 @@ int ovs_flow_key_extract_userspace(const struct nlattr *attr,
+ 				   struct sw_flow_key *key, bool log);
+ /* Update the non-metadata part of the flow key using skb. */
+ int ovs_flow_key_update(struct sk_buff *skb, struct sw_flow_key *key);
++int ovs_flow_key_rebuild(struct sk_buff *skb, struct sw_flow_key *key);
++void ovs_metadata_key_extract(const struct ovs_tunnel_info *tun_info,
++			     struct sk_buff *skb,
++			     struct sw_flow_key *key);
++
++void update_range(struct sw_flow_match *, size_t, size_t, bool);
++#define SW_FLOW_KEY_PUT(match, field, value, is_mask) \
++	do { \
++		update_range(match, offsetof(struct sw_flow_key, field),    \
++			     sizeof((match)->key->field), is_mask);	    \
++		if (is_mask)						    \
++			(match)->mask->key.field = value;		    \
++		else							    \
++			(match)->key->field = value;		            \
++	} while (0)
++
++#define SW_FLOW_KEY_MEMCPY_OFFSET(match, offset, value_p, len, is_mask)	    \
++	do {								    \
++		update_range(match, offset, len, is_mask);		    \
++		if (is_mask)						    \
++			memcpy((u8 *)&(match)->mask->key + offset, value_p, len);\
++		else							    \
++			memcpy((u8 *)(match)->key + offset, value_p, len);  \
++	} while (0)
++
++#define SW_FLOW_KEY_MEMCPY(match, field, value_p, len, is_mask)		      \
++	SW_FLOW_KEY_MEMCPY_OFFSET(match, offsetof(struct sw_flow_key, field), \
++				  value_p, len, is_mask)
++
++#define SW_FLOW_KEY_MEMSET_FIELD(match, field, value, is_mask)		    \
++	do {								    \
++		update_range(match, offsetof(struct sw_flow_key, field),    \
++			     sizeof((match)->key->field), is_mask);	    \
++		if (is_mask)						    \
++			memset((u8 *)&(match)->mask->key.field, value,      \
++			       sizeof((match)->mask->key.field));	    \
++		else							    \
++			memset((u8 *)&(match)->key->field, value,           \
++			       sizeof((match)->key->field));                \
++	} while (0)
+ 
+ #endif /* flow.h */
+diff --git a/datapath/flow_netlink.c b/datapath/flow_netlink.c
+index 37b0bdd..013a4e9 100644
+--- a/datapath/flow_netlink.c
++++ b/datapath/flow_netlink.c
+@@ -51,66 +51,6 @@
+ 
+ #include "flow_netlink.h"
+ 
+-static void update_range(struct sw_flow_match *match,
+-			 size_t offset, size_t size, bool is_mask)
+-{
+-	struct sw_flow_key_range *range;
+-	size_t start = rounddown(offset, sizeof(long));
+-	size_t end = roundup(offset + size, sizeof(long));
+-
+-	if (!is_mask)
+-		range = &match->range;
+-	else
+-		range = &match->mask->range;
+-
+-	if (range->start == range->end) {
+-		range->start = start;
+-		range->end = end;
+-		return;
+-	}
+-
+-	if (range->start > start)
+-		range->start = start;
+-
+-	if (range->end < end)
+-		range->end = end;
+-}
+-
+-#define SW_FLOW_KEY_PUT(match, field, value, is_mask) \
+-	do { \
+-		update_range(match, offsetof(struct sw_flow_key, field),    \
+-			     sizeof((match)->key->field), is_mask);	    \
+-		if (is_mask)						    \
+-			(match)->mask->key.field = value;		    \
+-		else							    \
+-			(match)->key->field = value;		            \
+-	} while (0)
+-
+-#define SW_FLOW_KEY_MEMCPY_OFFSET(match, offset, value_p, len, is_mask)	    \
+-	do {								    \
+-		update_range(match, offset, len, is_mask);		    \
+-		if (is_mask)						    \
+-			memcpy((u8 *)&(match)->mask->key + offset, value_p, len);\
+-		else							    \
+-			memcpy((u8 *)(match)->key + offset, value_p, len);  \
+-	} while (0)
+-
+-#define SW_FLOW_KEY_MEMCPY(match, field, value_p, len, is_mask)		      \
+-	SW_FLOW_KEY_MEMCPY_OFFSET(match, offsetof(struct sw_flow_key, field), \
+-				  value_p, len, is_mask)
+-
+-#define SW_FLOW_KEY_MEMSET_FIELD(match, field, value, is_mask)		    \
+-	do {								    \
+-		update_range(match, offsetof(struct sw_flow_key, field),    \
+-			     sizeof((match)->key->field), is_mask);	    \
+-		if (is_mask)						    \
+-			memset((u8 *)&(match)->mask->key.field, value,      \
+-			       sizeof((match)->mask->key.field));	    \
+-		else							    \
+-			memset((u8 *)&(match)->key->field, value,           \
+-			       sizeof((match)->key->field));                \
+-	} while (0)
+-
+ static bool match_validate(const struct sw_flow_match *match,
+ 			   u64 key_attrs, u64 mask_attrs, bool log)
+ {
+diff --git a/datapath/flow_table.c b/datapath/flow_table.c
+index ad410fd..89e7a78 100644
+--- a/datapath/flow_table.c
++++ b/datapath/flow_table.c
+@@ -18,6 +18,7 @@
+ 
+ #include "flow.h"
+ #include "datapath.h"
++#include "flow_netlink.h"
+ #include <linux/uaccess.h>
+ #include <linux/netdevice.h>
+ #include <linux/etherdevice.h>
+@@ -57,6 +58,14 @@
+ static struct kmem_cache *flow_cache;
+ struct kmem_cache *flow_stats_cache __read_mostly;
+ 
++static struct flow_fastpath fastpath_array[] =
++{
++	{
++	}
++};
++#define FASTPATH_ARRAY_LEN ARRAY_SIZE(fastpath_array)
++static void fastpath_update(struct flow_table *tbl);
++
+ static u16 range_n_bytes(const struct sw_flow_key_range *range)
+ {
+ 	return range->end - range->start;
+@@ -263,10 +272,32 @@ static int tbl_mask_array_realloc(struct flow_table *tbl, int size)
+ 	return 0;
+ }
+ 
++static void tbl_mask_array_delete_mask(struct mask_array *, struct sw_flow_mask *);
++static void flow_fastpath_destroy(struct flow_table *table)
++{
++	int i, j;
++
++	rcu_assign_pointer(table->fastpath, NULL);
++	for (i = 0; i < FASTPATH_ARRAY_LEN; i++) {
++		struct flow_fastpath *fp = &fastpath_array[i];
++		struct mask_array *ma = fp->ma;
++
++		/* we have not been ref-counted masks */
++		for (j = 0; j < ma->count; j++) {
++			struct sw_flow_mask *mask = ovsl_dereference(ma->masks[j]);
++
++			tbl_mask_array_delete_mask(ma, mask);
++			call_rcu(&mask->rcu, rcu_free_sw_flow_mask_cb);
++		}
++		ma->max = 0;
++	}
++}
++
+ int ovs_flow_tbl_init(struct flow_table *table)
+ {
+ 	struct table_instance *ti;
+ 	struct mask_array *ma;
++	int i;
+ 
+ 	table->mask_cache = __alloc_percpu(sizeof(struct mask_cache_entry) *
+ 					  MC_HASH_ENTRIES, __alignof__(struct mask_cache_entry));
+@@ -285,6 +316,11 @@ int ovs_flow_tbl_init(struct flow_table *table)
+ 	rcu_assign_pointer(table->mask_array, ma);
+ 	table->last_rehash = jiffies;
+ 	table->count = 0;
++	rcu_assign_pointer(table->fastpath, NULL);
++	for (i = 0; i < FASTPATH_ARRAY_LEN; i++) {
++		struct flow_fastpath *fp = &fastpath_array[i];
++		fp->init(fp);
++	}
+ 	return 0;
+ 
+ free_mask_array:
+@@ -337,6 +373,7 @@ void ovs_flow_tbl_destroy(struct flow_table *table)
+ {
+ 	struct table_instance *ti = rcu_dereference_raw(table->ti);
+ 
++	flow_fastpath_destroy(table);
+ 	free_percpu(table->mask_cache);
+ 	kfree(rcu_dereference_raw(table->mask_array));
+ 	table_instance_destroy(ti, false);
+@@ -696,6 +733,7 @@ static void flow_mask_remove(struct flow_table *tbl, struct sw_flow_mask *mask)
+ 
+ 			ma = ovsl_dereference(tbl->mask_array);
+ 			tbl_mask_array_delete_mask(ma, mask);
++			fastpath_update(tbl);
+ 
+ 			/* Shrink the mask array if necessary. */
+ 			if (ma->max >= (MASK_ARRAY_SIZE_MIN * 2) &&
+@@ -710,6 +748,7 @@ static void flow_mask_remove(struct flow_table *tbl, struct sw_flow_mask *mask)
+ void ovs_flow_tbl_remove(struct flow_table *table, struct sw_flow *flow)
+ {
+ 	struct table_instance *ti = ovsl_dereference(table->ti);
++	struct flow_fastpath *fp;
+ 
+ 	BUG_ON(table->count == 0);
+ 	hlist_del_rcu(&flow->hash_node[ti->node_ver]);
+@@ -719,6 +758,10 @@ void ovs_flow_tbl_remove(struct flow_table *table, struct sw_flow *flow)
+ 	 * accessible as long as the RCU read lock is held.
+ 	 */
+ 	flow_mask_remove(table, flow->mask);
++
++	fp = ovsl_dereference(table->fastpath);
++	if (fp && fp->update)
++		fp->update(table, fp);
+ }
+ 
+ static struct sw_flow_mask *mask_alloc(void)
+@@ -811,6 +854,7 @@ static int flow_mask_insert(struct flow_table *tbl, struct sw_flow *flow,
+ 	}
+ 
+ 	flow->mask = mask;
++	fastpath_update(tbl);
+ 	return 0;
+ }
+ 
+@@ -821,6 +865,7 @@ int ovs_flow_tbl_insert(struct flow_table *table, struct sw_flow *flow,
+ 	struct table_instance *new_ti = NULL;
+ 	struct table_instance *ti;
+ 	int err;
++	struct flow_fastpath *fp;
+ 
+ 	err = flow_mask_insert(table, flow, mask);
+ 	if (err)
+@@ -843,9 +888,71 @@ int ovs_flow_tbl_insert(struct flow_table *table, struct sw_flow *flow,
+ 		table_instance_destroy(ti, true);
+ 		table->last_rehash = jiffies;
+ 	}
++
++	fp = ovsl_dereference(table->fastpath);
++	if (fp && fp->update)
++		fp->update(table, fp);
++	return 0;
++}
++
++/* Return 0 if two mask arrays are identical in random
++ * order. We assume no duplicate in each of arrays.
++ */
++static int mask_array_cmp(const struct mask_array *a, const struct mask_array *b)
++{
++	int i, j;
++
++	if (a->count != b->count)
++		return 1;
++
++	for (i = 0; i < a->count; i++) {
++		struct sw_flow_mask *x;
++
++	        x = ovsl_dereference(a->masks[i]);
++		if (unlikely(!x))
++			continue;
++		for (j = 0; j < b->count; j++) {
++			struct sw_flow_mask *y;
++
++			y = ovsl_dereference(b->masks[j]);
++			if (unlikely(!y))
++				continue;
++			if (mask_equal(x, y))
++				break;
++		}
++		if (j == b->count)
++			return 1;
++	}
+ 	return 0;
+ }
+ 
++/*
++ * Search for a corresponding fastpath implementation.
++ * If there is a match, we install the corresponding one,
++ * otherwise de-install current one.
++ * So this can be used on both addition and deletion of a mask.
++ */
++static void fastpath_update(struct flow_table *tbl)
++{
++	const struct mask_array *ma;
++	int i;
++
++	ma = ovsl_dereference(tbl->mask_array);
++
++	for (i = 0; i < FASTPATH_ARRAY_LEN; i++) {
++		struct flow_fastpath *fp = &fastpath_array[i];
++
++		if (!fp->ma)
++			continue;
++		else if (mask_array_cmp(fp->ma, ma) == 0) {
++			rcu_assign_pointer(tbl->fastpath, fp);
++			break;
++		}
++	}
++	if (i == FASTPATH_ARRAY_LEN && ovsl_dereference(tbl->fastpath) != NULL)
++		rcu_assign_pointer(tbl->fastpath, NULL);
++}
++
+ /* Initializes the flow module.
+  * Returns zero if successful or a negative error code.
+  */
+diff --git a/datapath/flow_table.h b/datapath/flow_table.h
+index 9eb4af9..c75f271 100644
+--- a/datapath/flow_table.h
++++ b/datapath/flow_table.h
+@@ -56,12 +56,24 @@ struct table_instance {
+ 	bool keep_flows;
+ };
+ 
++struct flow_table;
++struct flow_fastpath;
++struct flow_fastpath {
++	void (*init)(struct flow_fastpath *);
++	struct sw_flow* (*lookup)(struct sk_buff *skb,
++				  struct sw_flow_key *key, int *error);
++	void (*update)(struct flow_table *tbl, struct flow_fastpath *fp);
++	void *data; /* opaque to store optimal database */
++	struct mask_array *ma;
++};
++
+ struct flow_table {
+ 	struct table_instance __rcu *ti;
+ 	struct mask_cache_entry __percpu *mask_cache;
+ 	struct mask_array __rcu *mask_array;
+ 	unsigned long last_rehash;
+ 	unsigned int count;
++	struct flow_fastpath __rcu *fastpath;
+ };
+ 
+ extern struct kmem_cache *flow_stats_cache;
+diff --git a/datapath/vport.c b/datapath/vport.c
+index 274e47f..3699a82 100644
+--- a/datapath/vport.c
++++ b/datapath/vport.c
+@@ -448,6 +448,8 @@ void ovs_vport_receive(struct vport *vport, struct sk_buff *skb,
+ {
+ 	struct pcpu_sw_netstats *stats;
+ 	struct sw_flow_key key;
++	const struct datapath *dp = vport->dp;
++	const struct flow_fastpath *fp;
+ 	int error;
+ 
+ 	stats = this_cpu_ptr(vport->percpu_stats);
+@@ -459,7 +461,21 @@ void ovs_vport_receive(struct vport *vport, struct sk_buff *skb,
+ 	ovs_skb_init_inner_protocol(skb);
+ 	OVS_CB(skb)->input_vport = vport;
+ 	OVS_CB(skb)->egress_tun_info = NULL;
+-	error = ovs_flow_key_extract(tun_info, skb, &key);
++	OVS_CB(skb)->flow = NULL;
++	fp = rcu_dereference_ovsl(dp->table.fastpath);
++	if (fp) {
++		struct sw_flow *flow;
++
++		memset(&key, 0, sizeof(key));
++		ovs_metadata_key_extract(tun_info, skb, &key);
++		flow = fp->lookup(skb, &key, &error);
++		if (likely(!error)) {
++			OVS_CB(skb)->flow = flow;
++			OVS_CB(skb)->key_maybe_masked = 1;
++		}
++	} else
++		/* Extract flow from 'skb' into 'key'. */
++		error = ovs_flow_key_extract(tun_info, skb, &key);
+ 	if (unlikely(error)) {
+ 		kfree_skb(skb);
+ 		return;
+-- 
+1.9.3 (Apple Git-50)
+

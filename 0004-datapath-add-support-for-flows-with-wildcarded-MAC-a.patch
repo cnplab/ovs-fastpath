@@ -1,0 +1,37 @@
+From 40364cb44796b5c45ab9746e00512e5c0e5fcac3 Mon Sep 17 00:00:00 2001
+From: Michio Honda <michio.honda@neclab.eu>
+Date: Wed, 26 Nov 2014 19:20:05 +0100
+Subject: [PATCH 4/5] datapath: add support for flows with wildcarded MAC
+ addresses
+
+OpenFlow 1.1 and later allow for this.
+---
+ datapath/flow_netlink.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/datapath/flow_netlink.c b/datapath/flow_netlink.c
+index 013a4e9..7885a55 100644
+--- a/datapath/flow_netlink.c
++++ b/datapath/flow_netlink.c
+@@ -54,7 +54,7 @@
+ static bool match_validate(const struct sw_flow_match *match,
+ 			   u64 key_attrs, u64 mask_attrs, bool log)
+ {
+-	u64 key_expected = 1ULL << OVS_KEY_ATTR_ETHERNET;
++	u64 key_expected = 0;
+ 	u64 mask_allowed = key_attrs;  /* At most allow all key attributes */
+ 
+ 	/* The following mask attributes allowed only if they
+@@ -73,7 +73,8 @@ static bool match_validate(const struct sw_flow_match *match,
+ 			| (1ULL << OVS_KEY_ATTR_MPLS));
+ 
+ 	/* Always allowed mask fields. */
+-	mask_allowed |= ((1ULL << OVS_KEY_ATTR_TUNNEL)
++	mask_allowed |= ((1ULL << OVS_KEY_ATTR_ETHERNET)
++		       | (1ULL << OVS_KEY_ATTR_TUNNEL)
+ 		       | (1ULL << OVS_KEY_ATTR_IN_PORT)
+ 		       | (1ULL << OVS_KEY_ATTR_ETHERTYPE));
+ 
+-- 
+1.9.3 (Apple Git-50)
+

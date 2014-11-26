@@ -1,0 +1,27 @@
+From 423f6d2eb57f7df3e7eb4e8359556a1c868772a7 Mon Sep 17 00:00:00 2001
+From: Michio Honda <michio.honda@neclab.eu>
+Date: Wed, 26 Nov 2014 13:40:23 +0100
+Subject: [PATCH 5/5] datapath: allowing for 802.1q encap without
+ KEY_ATTR_ETHERNET
+
+---
+ datapath/flow_netlink.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/datapath/flow_netlink.c b/datapath/flow_netlink.c
+index 7885a55..87bfa61 100644
+--- a/datapath/flow_netlink.c
++++ b/datapath/flow_netlink.c
+@@ -920,8 +920,7 @@ int ovs_nla_get_match(struct sw_flow_match *match,
+ 	if (err)
+ 		return err;
+ 
+-	if ((key_attrs & (1ULL << OVS_KEY_ATTR_ETHERNET)) &&
+-	    (key_attrs & (1ULL << OVS_KEY_ATTR_ETHERTYPE)) &&
++	if ((key_attrs & (1ULL << OVS_KEY_ATTR_ETHERTYPE)) &&
+ 	    (nla_get_be16(a[OVS_KEY_ATTR_ETHERTYPE]) == htons(ETH_P_8021Q))) {
+ 		__be16 tci;
+ 
+-- 
+1.9.3 (Apple Git-50)
+
