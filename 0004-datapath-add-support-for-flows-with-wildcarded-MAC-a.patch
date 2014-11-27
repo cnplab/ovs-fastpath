@@ -1,5 +1,5 @@
 From 514efa562297b2ac2cb8cb494bf8d151693ca074 Mon Sep 17 00:00:00 2001
-From: Michio Honda <michio.honda@neclab.eu>
+From: Michio Honda <micchie@sfc.wide.ad.jp>
 Date: Wed, 26 Nov 2014 19:20:05 +0100
 Subject: [PATCH 4/5] datapath: add support for flows with wildcarded MAC
  addresses

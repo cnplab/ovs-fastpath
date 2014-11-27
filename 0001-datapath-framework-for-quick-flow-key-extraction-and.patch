@@ -1,5 +1,5 @@
 From acc0f21af625a4d6b4061a27a3a621b8789de43b Mon Sep 17 00:00:00 2001
-From: Michio Honda <michio.honda@neclab.eu>
+From: Michio Honda <micchie@sfc.wide.ad.jp>
 Date: Wed, 5 Nov 2014 15:22:45 +0100
 Subject: [PATCH 1/5] datapath: framework for quick flow key extraction and
  lookup

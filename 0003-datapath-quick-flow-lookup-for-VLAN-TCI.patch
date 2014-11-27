@@ -1,5 +1,5 @@
 From 1e508cb493e30e706cff2e645147758bf5685d8b Mon Sep 17 00:00:00 2001
-From: Michio Honda <michio.honda@neclab.eu>
+From: Michio Honda <micchie@sfc.wide.ad.jp>
 Date: Wed, 26 Nov 2014 22:00:29 +0100
 Subject: [PATCH 3/5] datapath: quick flow lookup for VLAN TCI
 
